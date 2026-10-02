@@ -286,20 +286,93 @@
 
   // ---------- audio ----------
   let AC = null, master = null, muted = false, noiseBuf = null;
+  // Set when a phone call, alarm or app switch interrupts the audio. iOS often leaves an interrupted context
+  // silent even after resume() succeeds, so the next gesture throws it away and builds a fresh one.
+  let audioStale = false;
+  function buildAudio() {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    AC = ac;
+    master = ac.createGain();
+    master.gain.value = muted ? 0 : 0.42;
+    const comp = ac.createDynamicsCompressor();
+    master.connect(comp); comp.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    ac.onstatechange = () => {
+      if (ac !== AC || ac.state === 'running') return;
+      audioStale = true;   // 'interrupted' (iOS call) or 'suspended' by the system
+      stopAttackVoice();
+      autoPause();
+    };
+  }
+  // Called from every user gesture. Only a real gesture (finger lift, click, key) may start sound on a phone,
+  // so retry on each one.
   function audio() {
     try {
-      if (!AC) {
-        AC = new (window.AudioContext || window.webkitAudioContext)();
-        master = AC.createGain();
-        master.gain.value = muted ? 0 : 0.42;
-        const comp = AC.createDynamicsCompressor();
-        master.connect(comp); comp.connect(AC.destination);
-        noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
-        const d = noiseBuf.getChannelData(0);
-        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      if (AC && (audioStale || AC.state === 'closed')) {
+        stopAttackVoice();
+        const old = AC;
+        AC = null;
+        old.onstatechange = null;
+        try { const p = old.close(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* already closed */ }
       }
-      if (AC.state === 'suspended') AC.resume();
+      if (!AC) { buildAudio(); audioStale = false; }
+      if (AC.state !== 'running') {
+        const p = AC.resume();
+        if (p && p.catch) p.catch(() => {});
+        // iOS only fully wakes the output once something plays inside the gesture
+        const s = AC.createBufferSource();
+        s.buffer = AC.createBuffer(1, 1, AC.sampleRate);
+        s.connect(AC.destination);
+        s.start(0);
+      }
     } catch (e) { AC = null; }
+  }
+  ['pointerup', 'touchend', 'click', 'mousedown'].forEach(ev => document.addEventListener(ev, audio, true));
+
+  // The attack siren: a warbling whistle that sounds while birds are diving at the player and falls in
+  // pitch as the lowest attacker closes in, like the cabinet's dive sound. Small birds whistle high and
+  // fast; the big firebirds swoop with a lower, slower wail.
+  let attackV = null;
+  function startAttackVoice() {
+    if (!AC || muted || attackV || AC.state !== 'running') return;
+    const t = AC.currentTime;
+    const o = AC.createOscillator(), o2 = AC.createOscillator(), l = AC.createOscillator();
+    const lg = AC.createGain(), lg2 = AC.createGain(), g = AC.createGain();
+    o.type = 'triangle'; o2.type = 'square';
+    o.frequency.value = 1600; o2.frequency.value = 1600;
+    l.type = 'sine'; l.frequency.value = 12;
+    lg.gain.value = 110; lg2.gain.value = 110;
+    l.connect(lg); lg.connect(o.frequency);
+    l.connect(lg2); lg2.connect(o2.frequency);
+    const g2 = AC.createGain(); g2.gain.value = 0.18;
+    o.connect(g); o2.connect(g2); g2.connect(g);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.setTargetAtTime(0.05, t, 0.04);
+    g.connect(master);
+    o.start(t); o2.start(t); l.start(t);
+    attackV = { o, o2, l, lg, lg2, g };
+  }
+  function setAttackVoice(freq, rate, depth) {
+    if (!attackV) return;
+    const t = AC.currentTime;
+    attackV.o.frequency.setTargetAtTime(freq, t, 0.05);
+    attackV.o2.frequency.setTargetAtTime(freq, t, 0.05);
+    attackV.l.frequency.setTargetAtTime(rate, t, 0.1);
+    attackV.lg.gain.setTargetAtTime(depth, t, 0.1);
+    attackV.lg2.gain.setTargetAtTime(depth, t, 0.1);
+  }
+  function stopAttackVoice() {
+    if (!attackV) return;
+    const v = attackV;
+    attackV = null;
+    try {
+      const t = AC.currentTime;
+      v.g.gain.cancelScheduledValues(t);
+      v.g.gain.setTargetAtTime(0.0001, t, 0.04);
+      v.o.stop(t + 0.3); v.o2.stop(t + 0.3); v.l.stop(t + 0.3);
+    } catch (e) { /* context already gone */ }
   }
   function tone(type, f0, f1, dur, vol, delay = 0) {
     if (!AC || muted) return;
@@ -355,7 +428,8 @@
     chip() { noise(0.04, 0.12, 6000, 6000, 'highpass'); },
     clank() { tone('square', 220, 180, 0.04, 0.03); },
     hatch() { tone('sine', 320, 1300, 0.16, 0.07); tone('sine', 640, 1900, 0.1, 0.04, 0.06); },
-    chirp() { tone('sine', 1800, 2900, 0.07, 0.035); tone('sine', 2500, 1600, 0.08, 0.03, 0.08); },
+    dive() { tone('sine', 2700, 900, 0.5, 0.04); tone('triangle', 2730, 910, 0.5, 0.02); },
+    swoop() { tone('sawtooth', 1100, 240, 0.65, 0.03); noise(0.55, 0.12, 1000, 280, 'bandpass'); },
     playerDie() { noise(1.2, 0.55, 2600, 70); tone('sawtooth', 460, 30, 1.1, 0.12); },
     alienDie() {
       noise(2.4, 0.55, 3200, 50);
@@ -396,7 +470,10 @@
   });
   addEventListener('keyup', e => { keys[e.code] = false; });
   addEventListener('blur', () => { for (const k in keys) keys[k] = false; autoPause(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) autoPause(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { autoPause(); stopAttackVoice(); audioStale = true; }
+  });
+  addEventListener('pagehide', () => { stopAttackVoice(); audioStale = true; });
 
   document.querySelectorAll('#pad button[data-k]').forEach(btn => {
     const k = btn.dataset.k;
@@ -485,6 +562,7 @@
   function togglePause() {
     if (mode !== 'play') return;
     paused = !paused;
+    if (paused) stopAttackVoice(); else audio();
   }
   function autoPause() { if (mode === 'play') paused = true; }
   function toggleMute() {
@@ -664,7 +742,7 @@
     b.maxVx = 2.2 + 0.2 * cycle;
     b.agg = 1 + cycle * 0.2 + (wave === 1 ? 0.3 : 0);
     b.pullY = Math.random() < 0.45 ? rand(160, 215) : 999;
-    if (Math.random() < 0.6) sfx.chirp();
+    sfx.dive();
   }
 
   function updateSmall(b, fx, fy) {
@@ -746,6 +824,7 @@
     if (fight && player.alive && b.state === 'fly' && swoopers < maxSwoop &&
         Math.random() < 0.0018 * (1 + cycle * 0.4) * (wave === 3 ? 1.5 : 1)) {
       b.state = 'swoop'; b.tx = player.x; b.ty = 232; b.retarget = 240;
+      sfx.swoop();
     }
   }
 
@@ -904,7 +983,7 @@
             birds.push({ kind: 'small', pal: 'green', ox: 0, oy: 0, x: rand(20, W - 20), y: -10, vx: rand(-1, 1), vy: 1,
               state: 'dive', delay: 0, ph: 0, t: 0, anim: 0, escort: true,
               maxVy: 1.8 + 0.2 * cycle, maxVx: 2.2, agg: 1 + cycle * 0.2, pullY: 999 });
-            sfx.chirp();
+            sfx.dive();
           }
         }
       }
@@ -1445,8 +1524,26 @@
       acc -= STEP;
     }
     render();
+    updateAttackSound();
     if (coarseUI) syncSlideThumb();
     requestAnimationFrame(loop);
+  }
+
+  function updateAttackSound() {
+    if (!AC) return;
+    if (paused || mode !== 'play' || muted || document.hidden) { stopAttackVoice(); return; }
+    let low = -1, big = false;
+    for (const b of birds) {
+      if (b.dead) continue;
+      // wave-5 escorts circle endlessly, so they only sound off on the low part of each pass
+      const attacking = b.kind === 'small' ? b.state === 'dive' && b.y > (b.escort ? 120 : 0) : b.state === 'swoop';
+      if (attacking && b.y > low) { low = b.y; big = b.kind === 'big'; }
+    }
+    if (low < 0) { stopAttackVoice(); return; }
+    startAttackVoice();
+    const k = clamp((low - 40) / 210, 0, 1);
+    if (big) setAttackVoice(900 - k * 520, 6, 70);
+    else setAttackVoice(2000 - k * 1300, 13, 120);
   }
   requestAnimationFrame(loop);
 })();
