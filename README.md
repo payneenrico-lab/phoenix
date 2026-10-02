@@ -1,6 +1,6 @@
 # Phoenix
 
-A browser remake of the 1980 arcade shooter *Phoenix*. One `index.html`, no build step: canvas graphics, Web Audio sound, keyboard and touch controls.
+A browser remake of the 1980 arcade shooter *Phoenix*. One `index.html`, no build step: smooth vector graphics drawn at your screen's resolution, Web Audio sound, keyboard and touch controls.
 
 ## Play
 
@@ -8,11 +8,11 @@ Open `index.html` in a browser.
 
 | Action      | Keyboard              | Touch   |
 |-------------|-----------------------|---------|
-| Move        | ← → (or A / D)        | ◀ ▶     |
+| Move        | ← → (or A / D)        | Slider  |
 | Fire        | Space (or Z / ↑)      | FIRE    |
 | Force field | ↓ (or S / Shift)      | SHIELD  |
-| Pause       | P / Esc               | —       |
-| Sound       | M                     | —       |
+| Pause       | P / Esc               | PAUSE   |
+| Sound       | M                     | MUTE    |
 
 The force field lasts about a second, stops you moving and firing, and needs five seconds to recharge. Anything that touches it is destroyed.
 
